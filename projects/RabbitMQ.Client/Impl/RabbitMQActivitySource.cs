@@ -59,18 +59,82 @@ namespace RabbitMQ.Client
         public const string SubscriberSourceName = "RabbitMQ.Client.Subscriber";
         public const string ConnectionSourceName = "RabbitMQ.Client.Connection";
 
-        public static Action<Activity, IDictionary<string, object?>> ContextInjector { get; set; } =
-            DefaultContextInjector;
+        private static Action<Activity, IDictionary<string, object?>> s_contextInjector = DefaultContextInjector;
+        private static Func<IReadOnlyBasicProperties, ActivityContext> s_contextExtractor = DefaultContextExtractor;
+        private static RabbitMQTracingOptions s_tracingOptions = new RabbitMQTracingOptions();
 
-        public static Func<IReadOnlyBasicProperties, ActivityContext> ContextExtractor { get; set; } =
-            DefaultContextExtractor;
+        /*
+         * The four members below are process-wide, and the <remarks> on each says so. That is a
+         * property of .NET's tracing model rather than a shortcut in this client, so the docs
+         * explain the consequence instead of promising a scope that cannot be delivered: one
+         * ActivitySource produces a single Activity shared by every listener, and one publish
+         * injects a single set of headers, so neither span shape nor propagation can differ per
+         * TracerProvider. Configuration owned by something narrower than the process - the
+         * connection performing the operation - is tracked separately on #1981.
+         *
+         * The setters reject null. Before that, `ContextInjector = null` left every subsequent
+         * publish throwing NullReferenceException from inside the client, far from the assignment
+         * that caused it, and `TracingOptions = null` did the same to every publish and delivery.
+         */
 
+        /// <summary>
+        /// Delegate that injects the current <see cref="Activity"/> context into a published
+        /// message's headers. Defaults to W3C trace-context propagation using
+        /// <see cref="DistributedContextPropagator.Current"/>.
+        /// </summary>
+        /// <remarks>
+        /// Process-wide: this delegate is used by every connection in the process, so the last
+        /// assignment wins and nothing restores a previous value. Assigning
+        /// <see langword="null"/> throws <see cref="ArgumentNullException"/>.
+        /// </remarks>
+        public static Action<Activity, IDictionary<string, object?>> ContextInjector
+        {
+            get => s_contextInjector;
+            set => s_contextInjector = value ?? throw new ArgumentNullException(nameof(value));
+        }
+
+        /// <summary>
+        /// Delegate that extracts the upstream <see cref="ActivityContext"/> from a received
+        /// message's properties. Defaults to W3C trace-context propagation using
+        /// <see cref="DistributedContextPropagator.Current"/>.
+        /// </summary>
+        /// <remarks>
+        /// Process-wide: this delegate is used by every connection in the process, so the last
+        /// assignment wins and nothing restores a previous value. Assigning
+        /// <see langword="null"/> throws <see cref="ArgumentNullException"/>.
+        /// </remarks>
+        public static Func<IReadOnlyBasicProperties, ActivityContext> ContextExtractor
+        {
+            get => s_contextExtractor;
+            set => s_contextExtractor = value ?? throw new ArgumentNullException(nameof(value));
+        }
+
+        /// <summary>
+        /// Shortcut for <see cref="RabbitMQTracingOptions.UseRoutingKeyAsOperationName"/> on
+        /// <see cref="TracingOptions"/>. Reads and writes that instance, so it is affected by
+        /// replacing it.
+        /// </summary>
         public static bool UseRoutingKeyAsOperationName
         {
             get => TracingOptions.UseRoutingKeyAsOperationName;
             set => TracingOptions.UseRoutingKeyAsOperationName = value;
         }
-        public static RabbitMQTracingOptions TracingOptions { get; set; } = new RabbitMQTracingOptions();
+
+        /// <summary>
+        /// The options applied to every tracing span this client produces.
+        /// </summary>
+        /// <remarks>
+        /// Process-wide: these options shape the spans of every connection in the process, so the
+        /// last assignment wins and disposing a <c>TracerProvider</c> that configured them restores
+        /// nothing. Assigning replaces the instance, so a reference obtained from this property
+        /// beforehand is detached and no longer affects the client when mutated. Assigning
+        /// <see langword="null"/> throws <see cref="ArgumentNullException"/>.
+        /// </remarks>
+        public static RabbitMQTracingOptions TracingOptions
+        {
+            get => s_tracingOptions;
+            set => s_tracingOptions = value ?? throw new ArgumentNullException(nameof(value));
+        }
         internal static bool PublisherHasListeners => s_publisherSource.HasListeners();
 
         /*

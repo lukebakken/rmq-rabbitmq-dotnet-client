@@ -12,7 +12,7 @@ The findings were split into three groups, because they carry very different ris
 |---|---|---|
 | A | Behavioural defects: ambient-span pollution, failures never recorded, untagged `tcp connection attempt`, the null-`Headers` extractor path, a wrong comment | **Fixed.** Sections below are marked `FIXED` individually. |
 | B | Semantic-convention conformance. Each one changes emitted span names or attributes, and several break existing test assertions. | Open |
-| C | Public API: per-provider tracing configuration. Must land before #1923. | Open |
+| C | Public API: per-provider tracing configuration. Must land before #1923. | **Split into two PRs, both for 7.3.0.** The validation and documentation land first; the per-connection ownership model follows once its API shape is settled. See below. |
 
 Group A was separated out precisely because none of it changes a conforming attribute value or span name, so it can ship without a downstream consumer having to re-key anything. Groups B and C build on this branch as stacked PRs.
 
@@ -41,7 +41,7 @@ An earlier version of this document described this as only "the span now starts 
 | `RabbitMQ.Client.Publisher` | `publish` | `Channel.BasicPublish.cs` |
 | `RabbitMQ.Client.Subscriber` | `fetch`, `fetch (empty)`, `deliver` | `Channel.cs` (`BasicGetAsync`), `AsyncConsumerDispatcher` |
 
-`ConnectionSourceName` is the only tracing member still in `PublicAPI.Unshipped.txt`. Everything else - `TracingOptions`, `ContextInjector`, `ContextExtractor`, `UseRoutingKeyAsOperationName`, and all of `RabbitMQTracingOptions` - shipped in 7.2.1.
+`ConnectionSourceName` is the only tracing member still in `PublicAPI.Unshipped.txt`. Everything else - `TracingOptions`, `ContextInjector`, `ContextExtractor`, `UseRoutingKeyAsOperationName`, and all of `RabbitMQTracingOptions` - shipped in 7.2.0 (2025-11-06), so they have been public across 7.2.0, 7.2.1 and 7.2.2.
 
 ## Guard pattern: the shape that matters
 
@@ -199,7 +199,56 @@ This is not a memory-safety problem. 181,425 publishes with a concurrent writer 
 
 The statics are also unvalidated, so `ContextInjector = null` makes every subsequent publish throw `NullReferenceException` from inside the client.
 
-Because these members shipped in 7.2.1, removing them is a breaking change. Adding a per-provider path alongside them is not.
+Because these members shipped in 7.2.0, removing them is a breaking change. Adding a per-provider path alongside them is not.
+
+### Resolution: split into a prerequisite and the ownership model
+
+Per-`TracerProvider` configuration turned out not to be achievable at all, which reframes the whole finding. One `ActivitySource` produces a single `Activity` shared by every listener, and one publish injects a single set of headers, so neither span shape nor propagated context can differ per provider. No amount of locking or reference counting changes that; the original framing ("per-provider configuration expressed as process-global state") asked for something the platform does not offer.
+
+The work was therefore split in two, both parts targeted at 7.3.0. Landing first is the part that is unambiguously a defect, plus honest documentation of the part that is inherent:
+
+- The three setters reject `null` with `ArgumentNullException`, so a mistake surfaces at the assignment rather than as a `NullReferenceException` thrown from inside the client on some later publish.
+- All four members, and both `RabbitMQTracingOptions` properties, now document that the configuration is process-wide, that the last writer wins, and that disposal restores nothing. `TestTracingConfiguration.ConfigurationIsProcessWideAcrossTracerProviders` characterizes it so the documentation cannot drift from the behaviour.
+- The README gained the scope explanation, the span-name table, and both options.
+
+@danielmarbach's review reframed the real fix as ownership: the configuration belongs to the connection that performs the operation. @paulomorgado independently asked for the same shape, "a process-wide static default, that could be overridden by each connection (or connection factory)". That is the right model and it follows in its own PR rather than being dropped. Two attempts at it were reverted out of this PR, and the reasons are worth recording, because they are not obvious and the next attempt will hit them again.
+
+**Attempt one** made the configuration reference-counted to `TracerProvider` lifetime. Abandoned: it was machinery protecting a premise (per-provider scope) that does not hold.
+
+**Attempt two** added `ConnectionFactory.TracingOptions`, captured per connection, with `RabbitMQTracingOptions` extended to carry the injector and extractor, and the statics kept as a live fallback. A max-effort review found this silently broken on its own documented path, confirmed against a live broker:
+
+- **Whole-object fallback loses the other layer.** Resolution was `tracing ?? s_tracingOptions`, and a fresh `RabbitMQTracingOptions` pre-seeds the *client's* built-in delegates. So `cf.TracingOptions = new RabbitMQTracingOptions { UsePublisherAsParent = false }` - a span-shaping tweak, and exactly what the new docs told users to write - switched that connection off OpenTelemetry propagation. Messages went out with `traceparent` and no `baggage` header, `Propagators.DefaultTextMapPropagator` was never consulted so a B3 or Jaeger propagator was ignored, and the deliver path stopped resetting `Baggage.Current` per message. Spans still exported, so the wiring looked correct.
+- **The same fallback made the two configuration points mutually exclusive.** Configuring a factory and then passing `configure` to the builder-only overload silently ignored the latter, because the factory's non-null instance won as a whole.
+- **A factory-scoped call stopped configuring the process.** `AddRabbitMQInstrumentation(builder, factory, ...)` no longer installed the OpenTelemetry delegates globally, so any connection the caller does not own - a second factory, or one built inside MassTransit, EasyNetQ or Rebus - quietly fell back to the built-in propagation. That is the same behaviour break that had already been rejected as unshippable in a minor release when considering repurposing the no-argument overload.
+
+The fix for all three is **per-member** fallback: each member `null` meaning "inherit the layer below", rather than one nullable options object. Where those nullable members live is the open question, and it is a compatibility decision rather than a technical one.
+
+`RabbitMQTracingOptions` shipped in 7.2.0 with non-nullable `bool` properties (`PublicAPI.Shipped.net8.0.txt` lines 870-875), so expressing "inherit" on that type means changing `bool` to `bool?`. Measured, that break is narrower than it sounds:
+
+| Usage | Under `bool?` |
+|---|---|
+| `new RabbitMQTracingOptions { UseRoutingKeyAsOperationName = true }` | compiles |
+| `options.UseRoutingKeyAsOperationName = flag;` | compiles |
+| `bool x = options.UseRoutingKeyAsOperationName;` | `CS0266` |
+| `if (options.UseRoutingKeyAsOperationName)` | `CS0266` |
+| `options.UseRoutingKeyAsOperationName && y` | `CS0019` |
+
+Writes are unaffected; only reads break at source level, and an options object is written far more often than read. Binary compatibility breaks regardless, because the getter's return type is part of its signature. Within the client only the span factories and the static shortcut read them, and `RabbitMQActivitySource.UseRoutingKeyAsOperationName` can stay `bool` by resolving `null` to the default, so that shipped member need not change.
+
+Four candidate shapes, none of them settled:
+
+1. **`bool?` on `RabbitMQTracingOptions`.** One type, one mental model, one member list. Breaking, as above.
+2. **A new options type for the per-connection layer**, leaving the shipped type as the process-wide default. Non-breaking, but two near-identical types forever, and two member lists to keep in step - the drift risk that already produced a finding against `Clone()`.
+3. **Nullable delegates only.** The delegates are unshipped, so they can be `null`-means-inherit for free, while the two bools keep whole-object semantics. Non-breaking, and it fixes the severe defect (silent propagation loss). The residual wart is real, though: a factory that sets options only to add a custom injector silently reverts both span-shaping flags to `true`, even where the process-wide default had set them `false`.
+4. **Four nullable properties directly on `ConnectionFactory`**, no options object at the connection layer at all. Non-breaking, per-member by construction, and consistent with how the factory already exposes every other knob as an individual property. Costs four more properties on an already-large type, and does not compose as neatly for capturing a snapshot.
+
+Whichever is chosen, `IConnectionFactory` is the second decision: it declares every comparable per-connection knob, adding to a public interface breaks external implementers, and `ConnectionFactory` is `sealed`.
+
+Two further constraints for that work:
+
+- Deprecating the statics before their replacement exists would leave interface-typed consumers with a `CS0618` warning and nothing to migrate to, which is why nothing is marked `[Obsolete]` yet.
+- Resolving the configuration through `Session.Connection` from the channel put an unguarded dereference on the deliver path, load-bearing only because three separate `HasListeners()` gates happen to precede it, and opened a window in the `Channel` constructor where the consumer dispatcher's `Task.Run` starts before `Session` is assigned. `CreateChannelOptions.CreateOrUpdate` already copies `ConnectionConfig` values into the channel options, so a readonly field set in the constructor removes the walk, both gates and the hazard.
+- Resolve the options **once per operation**, into a local. The publish path resolved them twice - once for the span name and again for the injector - which breaks the "callers resolve once and read all options from the returned instance" rule that the resolver's own comment states, and lets a single span take its name from one configuration and its propagated context from another if the configuration changes in between. Passing the resolved instance into the header-population helper fixes the split read and removes a second `Session.Connection` walk per traced publish.
 
 ## Exception events are on a deprecation path
 
@@ -348,7 +397,11 @@ The restore matters beyond politeness. The pre-existing parameterized tag tests 
 
 ## Documentation gap
 
-`messaging-spans.md` states that an instrumentation using the message creation context as the parent of `process` spans SHOULD document that it does so, and MAY offer a configuration option. This client does exactly that by default (`UsePublisherAsParent = true`) and the option exists, but the `RabbitMQ.Client.OpenTelemetry` README documents only SDK wiring - not the trace structure, the span names, the attributes emitted, or either option.
+`messaging-spans.md` states that an instrumentation using the message creation context as the parent of `process` spans SHOULD document that it does so, and MAY offer a configuration option. This client does exactly that by default (`UsePublisherAsParent = true`) and the option exists, but the `RabbitMQ.Client.OpenTelemetry` README documented only SDK wiring - not the trace structure, the span names, the attributes emitted, or either option.
+
+**Mostly closed** alongside the Group C validation work. The README now documents the three activity sources and their span names, both options, and the scope of the configuration. Still missing: the emitted attributes, which belong with Group B, since that is where the attribute set changes.
+
+One correction came out of writing it. Saying that `UsePublisherAsParent = false` attaches the publisher context "as a link instead" is wrong: `StartLinkedRabbitMQActivity` adds the link whenever the extracted context is non-default, in both modes, and the flag only feeds `parentContext`. So the flag drops the parent and leaves the link rather than swapping one for the other. Worth stating precisely, because this is the sentence the convention asks instrumentations to document and therefore the one a downstream consumer will quote.
 
 ## What was checked and found clean
 
