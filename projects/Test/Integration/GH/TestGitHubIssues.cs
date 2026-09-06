@@ -156,6 +156,53 @@ namespace Test.Integration.GH
         }
 
         [Fact]
+        public async Task AbortWithZeroTimeoutDoesNotThrow_GH1973()
+        {
+            /*
+             * The companion to the case above, and the reason the two are worth having together:
+             * they are the only coverage of the single production line #2011 changes,
+             * `timeout = ResolveCloseTimeout(timeout, abort)` in Connection.CloseAsync. Every unit
+             * test in TestConnectionCloseTimeout calls that helper directly, so none of them notices
+             * if the call site passes the wrong flag.
+             *
+             * The pair pins the difference. TimeSpan.Zero resolves to zero for a graceful close, so
+             * DisposeWhileCatchingTimeoutDeadlocksRepro_GH1759 requires a throw; the same value
+             * resolves to the 5 second abort floor here, so an abort must not throw. Mutating the
+             * call site to `ResolveCloseTimeout(timeout, !abort)` makes the graceful case fail with
+             * "No exception was thrown", which is what closes that gap.
+             *
+             * This case does not detect that mutation, and the boundary is worth recording so nobody
+             * repeats the two attempts that failed. Both were measured, not assumed:
+             *
+             *   - Making abort rethrow unconditionally does NOT fail this test. On a healthy broker
+             *     the abort's wait succeeds in roughly 175ms, so the catch block that decides whether
+             *     to rethrow is never entered at all.
+             *   - Removing the `if (false == abort)` guard around ThrowAlreadyClosedException also
+             *     does NOT fail it. The default factory returns an AutorecoveringConnection, whose
+             *     CloseAsync returns early on `if (_innerConnection.IsOpen)`, so a second close never
+             *     reaches Connection.CloseAsync.
+             *
+             * So the abort half of the call-site flag, and abort's never-throw contract on a timeout,
+             * both need a connection whose main loop does not complete promptly - fault injection
+             * rather than a healthy broker. What this test does cover is that AbortAsync(TimeSpan.Zero)
+             * tears the connection down without throwing, on an input that was unreachable before
+             * #1973 because the floor turned it into 5 seconds, and that a redundant abort afterwards
+             * is silent.
+             */
+            _connFactory = new ConnectionFactory();
+            _conn = await _connFactory.CreateConnectionAsync();
+
+            await _conn.AbortAsync(TimeSpan.Zero);
+
+            Assert.False(_conn.IsOpen, "an abort must close the connection whatever the timeout");
+
+            // Abort is best-effort and never throws, including on a connection already closed.
+            await _conn.AbortAsync(TimeSpan.Zero);
+
+            await _conn.DisposeAsync();
+        }
+
+        [Fact]
         public async Task InvalidCredentialsShouldThrow_GH1777()
         {
             string userPass = Guid.NewGuid().ToString();
