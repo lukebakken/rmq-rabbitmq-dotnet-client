@@ -463,6 +463,29 @@ namespace Test.Integration
             Assert.True(sawContinuationTimeout);
         }
 
+        /*
+         * Both GH1930 scenarios need the client's write loop to stall, which they arrange by filling
+         * the OS socket send buffer: 512 bodies of 65 KB through a Rate=1 toxic. Whether that
+         * actually blocks depends on how much the environment buffers, and some do not block at all.
+         * Measured on WSL2 with Docker, both scenarios reported 0 of 512 publishes blocked on most
+         * runs, so the state under test was never reached; the same tests pass on the CI runners.
+         *
+         * A test that cannot reach its pre-condition has not found a defect, so say so rather than
+         * failing, and only outside CI. In CI a missing stall stays a loud failure, because there it
+         * would mean the mechanism really has changed.
+         */
+        private static void SkipIfWriteLoopDidNotStall(int blockedCount, int publishCount)
+        {
+            if (blockedCount > 128)
+            {
+                return;
+            }
+
+            Skip.IfNot(IsRunningInCI,
+                $"only {blockedCount}/{publishCount} publishes blocked, so this environment did not " +
+                "stall the write loop and the scenario under test cannot be reached here");
+        }
+
         // Regression test for https://github.com/rabbitmq/rabbitmq-dotnet-client/issues/1930
         // Scenario A: publisher confirms disabled.
         //
@@ -548,8 +571,9 @@ namespace Test.Integration
             // exact pre-condition the test exercises. How many complete before the
             // stall depends on OS TCP send-buffer size, so we only assert the minimum.
             int blockedCount = publishTasks.Count(t => !t.IsCompleted);
+            SkipIfWriteLoopDidNotStall(blockedCount, PublishCount);
             Assert.True(blockedCount > 128,
-                $"{blockedCount}/{PublishCount} tasks are blocked before flush timeout – the write loop " +
+                $"{blockedCount}/{PublishCount} tasks are blocked before flush timeout - the write loop " +
                 $"may not have stalled. Increase PublishCount or body size.");
 
             var publishCompletionTimeout = TimeSpan.FromSeconds(15);
@@ -701,8 +725,9 @@ namespace Test.Integration
             // exact pre-condition the test exercises. How many complete before the
             // stall depends on OS TCP send-buffer size, so we only assert the minimum.
             int blockedCount = publishTasks.Count(t => !t.IsCompleted);
+            SkipIfWriteLoopDidNotStall(blockedCount, PublishCount);
             Assert.True(blockedCount > 128,
-                $"{blockedCount}/{PublishCount} tasks are blocked before flush timeout – the write loop " +
+                $"{blockedCount}/{PublishCount} tasks are blocked before flush timeout - the write loop " +
                 $"may not have stalled. Increase PublishCount or body size.");
 
             // Use a test-local timeout that is short enough to keep CI fast but long
