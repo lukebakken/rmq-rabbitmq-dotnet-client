@@ -176,8 +176,13 @@ namespace Test.Unit
                 Assert.Equal(ceiling, Connection.ResolveCloseTimeout(unbounded, abort: true));
             }
 
-            // A value inside the band is honoured as given; outside it is clamped to the nearer end.
-            TimeSpan inBand = floor + ((ceiling - floor) / 2);
+            /*
+             * A value inside the band is honored as given; outside it is clamped to the nearer end.
+             * Ticks arithmetic rather than `(ceiling - floor) / 2`: the TimeSpan division operators
+             * were added in .NET Core 2.0 and do not exist on .NET Framework, so the latter compiles
+             * on net8.0 and breaks the net472 target of this project.
+             */
+            TimeSpan inBand = floor + TimeSpan.FromTicks((ceiling - floor).Ticks / 2);
             Assert.Equal(inBand, Connection.ResolveCloseTimeout(inBand, abort: true));
             Assert.Equal(floor, Connection.ResolveCloseTimeout(TimeSpan.Zero, abort: true));
             Assert.Equal(floor, Connection.ResolveCloseTimeout(floor - TimeSpan.FromSeconds(1), abort: true));
