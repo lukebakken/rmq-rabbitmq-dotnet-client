@@ -80,20 +80,34 @@ namespace Test.Unit
         }
 
         [Theory]
-        [InlineData(-5000)]
-        [InlineData(-2)]
-        public void NegativeTimeoutOtherThanInfiniteIsRaisedToTheFloor_GH1973(int milliseconds)
+        [InlineData(-50000000)] // -5s:       rejected by CancellationTokenSource
+        [InlineData(-20000)]    // -2ms:      rejected by CancellationTokenSource
+        [InlineData(-10001)]    // -1.0001ms: ACCEPTED, and never cancels
+        [InlineData(-9999)]     // -0.9999ms: ACCEPTED, and cancels immediately
+        public void NegativeTimeoutOtherThanInfiniteIsRaisedToTheFloor_GH1973(long ticks)
         {
             /*
-             * The exemption must match Timeout.InfiniteTimeSpan exactly, and no other negative
+             * The exemption must match Timeout.InfiniteTimeSpan exactly and no other negative
              * value, because the floors are what keep every other negative away from the
-             * CancellationTokenSource. Do not assume the constructor would reject them: it
-             * validates (long)delay.TotalMilliseconds >= -1, which truncates toward zero, so
-             * anything strictly between -2ms and 0 is accepted and cancels within milliseconds,
-             * which is the truncated-handshake failure of #1802 with no exception to flag it.
-             * Without this case, loosening the check to `timeout < TimeSpan.Zero` would still pass.
+             * CancellationTokenSource. Loosening the check to `timeout < TimeSpan.Zero`, or to
+             * `(long)timeout.TotalMilliseconds == -1`, must fail here.
+             *
+             * The cases are chosen from measured constructor behaviour, not assumed. The
+             * constructor validates (long)delay.TotalMilliseconds >= -1, and that cast truncates
+             * toward zero, which splits the sub-2ms negatives into two regimes with opposite
+             * hazards:
+             *
+             *   (-2ms, -1ms]  truncates to -1  -> accepted, timer never armed, never cancels.
+             *                                     A silent unbounded close, the worse of the two.
+             *   (-1ms, 0)     truncates to 0   -> accepted, cancels immediately, truncating the
+             *                                     handshake as in #1802 with no exception to flag it.
+             *
+             * Anything at or below -2ms throws ArgumentOutOfRangeException instead, which is why
+             * the first two cases alone would not cover the reachable hazards - they only exercise
+             * values the constructor already rejects loudly. Ticks rather than milliseconds
+             * because an int millisecond parameter cannot express -1.0001ms.
              */
-            TimeSpan timeout = TimeSpan.FromMilliseconds(milliseconds);
+            TimeSpan timeout = TimeSpan.FromTicks(ticks);
             Assert.NotEqual(Timeout.InfiniteTimeSpan, timeout);
 
             Assert.Equal(InternalConstants.DefaultConnectionCloseTimeout,
@@ -147,21 +161,37 @@ namespace Test.Unit
         public void TheCeilingItselfIsAcceptedAndOneTickAboveIsClamped_GH1973()
         {
             /*
-             * The guard is `timeout > ceiling`, so the ceiling itself must pass through and the
-             * smallest value above it must clamp. Without these two inputs the guard's boundary is
-             * untested: mutating the ceiling to a value the runtime rejects, or the comparison to
-             * >=, left the whole suite green, while the first of those reintroduces the
-             * ArgumentOutOfRangeException-before-shutdown bug this test file exists for.
+             * The guard is `timeout > ceiling`, so the ceiling itself must pass through and a value
+             * above it must clamp.
+             *
+             * Note what these two assertions alone cannot catch, because every comparison here is
+             * against the ceiling constant itself: lowering the ceiling leaves them green. Mutating
+             * the net8.0 ceiling from uint.MaxValue - 1 ms (~49.71 days) down to int.MaxValue ms
+             * (~24.86 days) halves the honoured bound and contradicts this library's own public
+             * documentation, yet the whole suite still passes. Nor can `>` mutated to `>=` be
+             * caught: the clamp assigns the ceiling, so both spellings return the same value.
+             *
+             * The maximality assertion below is what closes that gap, and it is the reason to
+             * express the step in milliseconds rather than ticks. `ceiling + FromTicks(1)` is
+             * itself accepted by the constructor, because (long)TotalMilliseconds truncates it back
+             * to the same millisecond, so a one-tick step can never reproduce the
+             * ArgumentOutOfRangeException-before-shutdown bug this file exists for.
              */
             TimeSpan ceiling = Connection.s_maxCancellationTokenSourceDelay;
+            TimeSpan justOver = ceiling + TimeSpan.FromMilliseconds(1);
 
             Assert.Equal(ceiling, Connection.ResolveCloseTimeout(ceiling, abort: false));
-            Assert.Equal(ceiling,
-                Connection.ResolveCloseTimeout(ceiling + TimeSpan.FromTicks(1), abort: false));
+            Assert.Equal(ceiling, Connection.ResolveCloseTimeout(justOver, abort: false));
 
-            // The ceiling must be a value CancellationTokenSource actually accepts on this runtime.
-            using var cts = new CancellationTokenSource(ceiling);
-            Assert.False(cts.IsCancellationRequested);
+            // The ceiling must be the largest value CancellationTokenSource accepts on this
+            // runtime: accepted at the ceiling, rejected one millisecond above it. The second half
+            // is what fails if the ceiling is ever set below the runtime's real limit.
+            using (var cts = new CancellationTokenSource(ceiling))
+            {
+                Assert.NotEqual(default, cts.Token);
+            }
+
+            Assert.Throws<ArgumentOutOfRangeException>(() => new CancellationTokenSource(justOver));
         }
 
         [Fact]
@@ -175,10 +205,10 @@ namespace Test.Unit
             TimeSpan[] inputs =
             {
                 Timeout.InfiniteTimeSpan, TimeSpan.Zero, TimeSpan.FromSeconds(6),
-                TimeSpan.FromSeconds(60), TimeSpan.FromMilliseconds(-2),
+                TimeSpan.FromSeconds(60), TimeSpan.FromMilliseconds(-2), TimeSpan.FromTicks(-10001),
                 // FromDays(30) is above the .NET Framework CancellationTokenSource limit
                 // (~24.86 days) but below the modern .NET limit, so it is what catches a
-                // miscalibrated MaxCancellationTokenSourceDelay on net472. See #1973.
+                // miscalibrated s_maxCancellationTokenSourceDelay on net472. See #1973.
                 TimeSpan.FromDays(30),
                 TimeSpan.FromDays(60), TimeSpan.MaxValue, TimeSpan.MinValue
             };

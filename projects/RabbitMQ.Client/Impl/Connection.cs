@@ -532,12 +532,14 @@ namespace RabbitMQ.Client.Impl
         /// the best-effort, never-throw contract abort exists to provide.
         /// </para>
         /// <para>
-        /// A timeout too large for <see cref="CancellationTokenSource"/> to accept is
-        /// treated as a request to wait without a bound, which is what such a value means
-        /// in practice. Passing it through instead would throw
+        /// A timeout too large for <see cref="CancellationTokenSource"/> to accept is clamped to
+        /// <see cref="s_maxCancellationTokenSourceDelay"/>. Passing it through instead would throw
         /// <see cref="ArgumentOutOfRangeException"/> from the <see cref="CancellationTokenSource"/>
         /// constructor in the close path before the close reason is set, leaving the connection
-        /// fully open with no shutdown attempted.
+        /// fully open with no shutdown attempted. Clamping is deliberate rather than promoting the
+        /// value to <see cref="Timeout.InfiniteTimeSpan"/>: an over-large value still asks for a
+        /// bounded wait, and promoting it would both remove the bound entirely and make the abort
+        /// branch non-monotonic, since more time requested would yield the 5 second floor.
         /// </para>
         /// </remarks>
         internal static TimeSpan ResolveCloseTimeout(TimeSpan timeout, bool abort)
