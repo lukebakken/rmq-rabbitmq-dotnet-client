@@ -40,6 +40,18 @@ namespace RabbitMQ.Client
         internal static readonly TimeSpan DefaultChannelDisposeTimeout = TimeSpan.FromSeconds(5);
 
         /// <summary>
+        /// The longest an abort will wait, whatever the caller asked for.
+        /// </summary>
+        /// <remarks>
+        /// An abort is best-effort teardown that never throws, so its value to a caller is that it
+        /// returns promptly. Honouring an arbitrarily large abort timeout defeats that: it turns
+        /// "tear this down and move on" into a wait that can outlast the process. The caller's value
+        /// is still honoured between <see cref="DefaultConnectionAbortTimeout"/> and this ceiling, so
+        /// asking for longer is not an error, just capped.
+        /// </remarks>
+        internal static readonly TimeSpan MaxConnectionAbortTimeout = TimeSpan.FromSeconds(10);
+
+        /// <summary>
         /// Largest message size, in bytes, allowed in RabbitMQ.        
         /// Note: <code>rabbit.max_message_size</code> setting (https://www.rabbitmq.com/configure.html)
         /// configures the largest message size which should be lower than this maximum of 128MiB.

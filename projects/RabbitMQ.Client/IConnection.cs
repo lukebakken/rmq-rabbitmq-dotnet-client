@@ -233,23 +233,26 @@ namespace RabbitMQ.Client
         /// <param name="reasonText">A message indicating the reason for closing the connection.</param>
         /// <param name="timeout">
         /// How long to wait for the in-progress close operations to complete, after which the
-        /// wait ends and the connection is torn down on a best-effort basis. The timeout also
-        /// bounds the close handshake itself, so a
-        /// value too short to complete it leaves the connection only partly shut down: a
-        /// graceful close therefore resolves anything under 30 seconds to 30 seconds, and an
-        /// abort resolves anything under 5 seconds to 5 seconds. A graceful close accepts
-        /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> to wait without a bound, and
-        /// nothing can end that wait: no timer is armed and <paramref name="cancellationToken"/> is
-        /// ignored while the underlying connection is open. That last point applies to the close
-        /// of the connection itself; on a connection with automatic recovery enabled the token is
-        /// still observed while its recovery loop is stopped, which happens first. An abort is never
-        /// unbounded and resolves
-        /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> to 5 seconds, but honours a
-        /// larger finite value as given. A value too large for the timer, including
-        /// <see cref="TimeSpan.MaxValue"/>, is clamped to the largest supported bound rather than
-        /// throwing; that limit is roughly 24.86 days for the netstandard2.0 build of this library
-        /// and roughly 49.7 days for the net8.0 build, selected by the build your application
-        /// resolves rather than by the runtime it executes on.
+        /// wait ends and the connection is torn down on a best-effort basis. The value is honoured
+        /// as given for a graceful close, including <see cref="TimeSpan.Zero"/>, which means "do not
+        /// wait". Because the timeout also bounds the close handshake itself, a value too short to
+        /// complete it leaves the connection only partly shut down and the returned task faulted with
+        /// an <see cref="OperationCanceledException"/>; the connection is still closed.
+        /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> waits without a bound; a value
+        /// merely too large for the timer to express is clamped to the largest bound it accepts
+        /// (roughly 24.86 days) rather than becoming unbounded. A negative value other than
+        /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> is treated as
+        /// <see cref="TimeSpan.Zero"/>. A <see cref="CancellationToken"/> passed alongside is
+        /// deliberately ignored while the underlying connection is open, so that a close already
+        /// under way is not truncated; on a connection with automatic recovery enabled the token is
+        /// still observed while its recovery loop is stopped, which happens first.
+        /// <para>
+        /// An abort is different: it is always bounded, between 5 and 10 seconds. It is best-effort
+        /// teardown that never throws, so its value to a caller is returning promptly, and its wait
+        /// is bounded by this timeout alone. A larger request, including
+        /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> and
+        /// <see cref="TimeSpan.MaxValue"/>, is capped at 10 seconds rather than honoured.
+        /// </para>
         /// </param>
         /// <param name="abort">Whether or not this close is an abort (ignores certain exceptions).</param>
         /// <param name="cancellationToken">Cancellation token</param>

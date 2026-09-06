@@ -72,17 +72,17 @@ namespace RabbitMQ.Client
         /// To wait infinitely for the close operations to complete use <see cref="System.Threading.Timeout.InfiniteTimeSpan"/>.
         /// </para>
         /// <para>
-        /// A finite timeout shorter than 30 seconds is raised to 30 seconds, because the
-        /// timeout also bounds the close handshake itself and cutting that short leaves the
-        /// connection only partly shut down. Use <see cref="System.Threading.Timeout.InfiniteTimeSpan"/>
-        /// to wait without a bound.
-        /// </para>
-        /// <para>
-        /// A value too large for the timer, including <see cref="TimeSpan.MaxValue"/>, is clamped to
-        /// the largest supported bound rather than throwing. That limit depends on which build of
-        /// this library your application resolves, not on the runtime it executes on: roughly 24.86
-        /// days for the netstandard2.0 build, which is what .NET Framework and .NET versions before
-        /// 8 load, and roughly 49.7 days for the net8.0 build.
+        /// The value is honoured as given, including <see cref="TimeSpan.Zero"/>, which means "do not
+        /// wait". Because the timeout also bounds the close handshake itself, a value too short to
+        /// complete it leaves the connection only partly shut down and this task faults with an
+        /// <see cref="OperationCanceledException"/> - the connection is still closed either way. Any
+        /// value too large for the timer to express, including <see cref="TimeSpan.MaxValue"/>, is
+        /// clamped to the largest bound it accepts, roughly 24.86 days, rather than throwing. It is
+        /// deliberately not treated as unbounded: only an explicit
+        /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> should produce a wait with no local
+        /// bound. A negative value other than
+        /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> is not a duration and is treated as
+        /// <see cref="TimeSpan.Zero"/>.
         /// </para>
         /// <para>
         /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> waits without any bound, and
@@ -96,11 +96,14 @@ namespace RabbitMQ.Client
         /// </para>
         /// <para>
         /// The bound this timeout removes covers the whole close, not only the wait for the peer's
-        /// reply. Sending <c>connection.close</c> is bounded by the same value, and writes queue
-        /// into a bounded buffer, so a peer that has stopped reading (a stalled or zero-window
-        /// connection) can park an unbounded close indefinitely before any reply is even expected.
-        /// Use <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> only where that is
-        /// acceptable; prefer a large finite timeout otherwise.
+        /// reply. Sending <c>connection.close</c> is bounded by the same value, and writes queue into
+        /// a bounded buffer, so a peer that has stopped reading (a stalled or zero-window connection)
+        /// can park an unbounded close indefinitely before any reply is even expected. Nor is there
+        /// much locally that can end such a wait: the heartbeat timers are stopped before it begins,
+        /// and the socket read timeout does not apply to asynchronous reads, so in practice it ends
+        /// only when the broker notices our silence and drops the TCP connection - which does not
+        /// happen when heartbeats are disabled. Prefer a large finite timeout unless you specifically
+        /// want that.
         /// </para>
         /// </remarks>
         public static Task CloseAsync(this IConnection connection, TimeSpan timeout)
@@ -218,18 +221,19 @@ namespace RabbitMQ.Client
         /// This method, behaves in a similar way as method <see cref="AbortAsync(IConnection, CancellationToken)"/> with the
         /// only difference that it explicitly specifies a timeout given
         /// for all the in-progress close operations to complete.
-        /// If timeout is reached and the close operations haven't finished, then socket is forced to close.
+        /// If the timeout is reached the wait ends and the connection is torn down on a best-effort
+        /// basis.
         /// <para>
-        /// An abort is always bounded, so unlike <see cref="CloseAsync(IConnection,TimeSpan)"/>
-        /// it does not honour <see cref="Timeout.InfiniteTimeSpan"/>. An abort's wait is bounded by
-        /// this timeout alone, because the caller's cancellation token is deliberately neutralized
-        /// on an open connection, so an unbounded abort would have nothing left that could end it -
-        /// it could never return, which defeats the best-effort, never-throw contract that abort
-        /// exists to provide. A timeout shorter than 5 seconds, or an
-        /// unbounded one, is resolved to 5 seconds, because the timeout also bounds the close
-        /// handshake itself and cutting that short leaves the connection only partly shut down. A
-        /// finite value above 5 seconds is honoured as given, however large, after being clamped to
-        /// the largest bound the timer supports.
+        /// An abort is always bounded, between 5 and 10 seconds, so unlike
+        /// <see cref="CloseAsync(IConnection,TimeSpan)"/> it does not honour
+        /// <see cref="Timeout.InfiniteTimeSpan"/> and does not honour an arbitrarily large value
+        /// either. Abort exists to tear the connection down and return promptly without throwing, and
+        /// its wait is bounded by this timeout alone, because the caller's cancellation token is
+        /// deliberately neutralized on an open connection. An unbounded abort would therefore have
+        /// nothing left that could end it, and an abort that waits for hours defeats the same
+        /// contract just as thoroughly. A value below 5 seconds is raised to 5 seconds, because the
+        /// timeout also bounds the close handshake itself and cutting that short leaves the connection
+        /// only partly shut down; anything above 10 seconds, unbounded or not, is capped there.
         /// </para>
         /// </remarks>
         public static Task AbortAsync(this IConnection connection, TimeSpan timeout)

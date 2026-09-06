@@ -140,13 +140,17 @@ namespace Test.Integration.GH
         {
             _connFactory = new ConnectionFactory();
             _conn = await _connFactory.CreateConnectionAsync();
-            try
-            {
-                await _conn.CloseAsync(TimeSpan.Zero);
-            }
-            catch (Exception)
-            {
-            }
+            /*
+             * The assertions matter as much as the absence of a deadlock. Until #1973 this test
+             * was vacuous with respect to its own scenario: CloseAsync raised TimeSpan.Zero to a
+             * 30 second floor, and a healthy connection closes in roughly 175ms, so the zero
+             * timeout was never reached and the deadlock this guards could not reproduce. Asserting
+             * that the close actually timed out is what keeps the zero path exercised.
+             */
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => _conn.CloseAsync(TimeSpan.Zero));
+
+            Assert.False(_conn.IsOpen, "a close that timed out must still have closed the connection");
 
             await _conn.DisposeAsync();
         }
