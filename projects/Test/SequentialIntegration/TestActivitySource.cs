@@ -85,7 +85,7 @@ namespace Test.SequentialIntegration
         [InlineData(false, false)]
         public async Task TestPublisherAndConsumerActivityTagsAsync(bool useRoutingKeyAsOperationName, bool usePublisherAsParent)
         {
-            using var tracingOptions = new TracingOptionsScope();
+            using var tracingOptions = new TracingConfigurationScope();
             RabbitMQActivitySource.UseRoutingKeyAsOperationName = useRoutingKeyAsOperationName;
             RabbitMQActivitySource.TracingOptions.UsePublisherAsParent = usePublisherAsParent;
             var activities = new List<Activity>();
@@ -124,7 +124,7 @@ namespace Test.SequentialIntegration
         [InlineData(false, false)]
         public async Task TestPublisherWithCachedStringsAndConsumerActivityTagsAsync(bool useRoutingKeyAsOperationName, bool usePublisherAsParent)
         {
-            using var tracingOptions = new TracingOptionsScope();
+            using var tracingOptions = new TracingConfigurationScope();
             RabbitMQActivitySource.UseRoutingKeyAsOperationName = useRoutingKeyAsOperationName;
             RabbitMQActivitySource.TracingOptions.UsePublisherAsParent = usePublisherAsParent;
             var activities = new List<Activity>();
@@ -165,7 +165,7 @@ namespace Test.SequentialIntegration
         [InlineData(false, false)]
         public async Task TestPublisherWithPublicationAddressAndConsumerActivityTagsAsync(bool useRoutingKeyAsOperationName, bool usePublisherAsParent)
         {
-            using var tracingOptions = new TracingOptionsScope();
+            using var tracingOptions = new TracingConfigurationScope();
             RabbitMQActivitySource.UseRoutingKeyAsOperationName = useRoutingKeyAsOperationName;
             RabbitMQActivitySource.TracingOptions.UsePublisherAsParent = usePublisherAsParent;
             var activities = new List<Activity>();
@@ -209,7 +209,7 @@ namespace Test.SequentialIntegration
         [InlineData(false, false, false)]
         public async Task TestPublisherAndBasicGetActivityTagsAsync(bool useRoutingKeyAsOperationName, bool usePublisherAsParent, bool useMessageId)
         {
-            using var tracingOptions = new TracingOptionsScope();
+            using var tracingOptions = new TracingConfigurationScope();
             RabbitMQActivitySource.UseRoutingKeyAsOperationName = useRoutingKeyAsOperationName;
             RabbitMQActivitySource.TracingOptions.UsePublisherAsParent = usePublisherAsParent;
             var activities = new List<Activity>();
@@ -246,7 +246,7 @@ namespace Test.SequentialIntegration
         [InlineData(false, false)]
         public async Task TestPublisherWithCachedStringsAndBasicGetActivityTagsAsync(bool useRoutingKeyAsOperationName, bool usePublisherAsParent)
         {
-            using var tracingOptions = new TracingOptionsScope();
+            using var tracingOptions = new TracingConfigurationScope();
             RabbitMQActivitySource.UseRoutingKeyAsOperationName = useRoutingKeyAsOperationName;
             RabbitMQActivitySource.TracingOptions.UsePublisherAsParent = usePublisherAsParent;
             var activities = new List<Activity>();
@@ -283,7 +283,7 @@ namespace Test.SequentialIntegration
         [InlineData(false, false)]
         public async Task TestPublisherWithPublicationAddressAndBasicGetActivityTagsAsync(bool useRoutingKeyAsOperationName, bool usePublisherAsParent)
         {
-            using var tracingOptions = new TracingOptionsScope();
+            using var tracingOptions = new TracingConfigurationScope();
             RabbitMQActivitySource.UseRoutingKeyAsOperationName = useRoutingKeyAsOperationName;
             RabbitMQActivitySource.TracingOptions.UsePublisherAsParent = usePublisherAsParent;
             var activities = new List<Activity>();
@@ -323,44 +323,6 @@ namespace Test.SequentialIntegration
         /// leaves process-global tracing state mutated for whatever runs next - see the
         /// public-API discussion on rabbitmq/rabbitmq-dotnet-client#1967.
         /// </remarks>
-        private sealed class PlainOperationNames : IDisposable
-        {
-            private readonly bool _previous;
-
-            public PlainOperationNames()
-            {
-                _previous = RabbitMQActivitySource.UseRoutingKeyAsOperationName;
-                RabbitMQActivitySource.UseRoutingKeyAsOperationName = false;
-            }
-
-            public void Dispose() => RabbitMQActivitySource.UseRoutingKeyAsOperationName = _previous;
-        }
-
-        /// <summary>
-        /// Captures UseRoutingKeyAsOperationName and UsePublisherAsParent on construction
-        /// and restores both on dispose. The parameterized tracing-tag tests set these
-        /// process-global options to their theory inputs; without restoring them the last
-        /// case leaves them mutated for whatever test runs next in the same process - see
-        /// the public-API discussion on rabbitmq/rabbitmq-dotnet-client#1967.
-        /// </summary>
-        private sealed class TracingOptionsScope : IDisposable
-        {
-            private readonly bool _useRoutingKeyAsOperationName;
-            private readonly bool _usePublisherAsParent;
-
-            public TracingOptionsScope()
-            {
-                _useRoutingKeyAsOperationName = RabbitMQActivitySource.UseRoutingKeyAsOperationName;
-                _usePublisherAsParent = RabbitMQActivitySource.TracingOptions.UsePublisherAsParent;
-            }
-
-            public void Dispose()
-            {
-                RabbitMQActivitySource.UseRoutingKeyAsOperationName = _useRoutingKeyAsOperationName;
-                RabbitMQActivitySource.TracingOptions.UsePublisherAsParent = _usePublisherAsParent;
-            }
-        }
-
         [Fact]
         public async Task TestPublishFailureIsRecordedOnTheSendActivity_GH1967()
         {
@@ -378,7 +340,7 @@ namespace Test.SequentialIntegration
              * PublishException surfaces from the confirmation await rather than from
              * the send itself.
              */
-            using var plainNames = new PlainOperationNames();
+            using var plainNames = new TracingConfigurationScope().WithPlainOperationNames();
 
             using ActivityRecorder publishRecorder =
                 new(RabbitMQActivitySource.PublisherSourceName, "publish");
@@ -417,7 +379,7 @@ namespace Test.SequentialIntegration
              * sequence is enough because it exercises the same core, and the failure
              * still surfaces from the confirmation await in the finally.
              */
-            using var plainNames = new PlainOperationNames();
+            using var plainNames = new TracingConfigurationScope().WithPlainOperationNames();
 
             using ActivityRecorder publishRecorder =
                 new(RabbitMQActivitySource.PublisherSourceName, "publish");
@@ -460,7 +422,7 @@ namespace Test.SequentialIntegration
              * without tracking there is no task to store the exception on, so it is
              * never handled and never resurfaces.
              */
-            using var plainNames = new PlainOperationNames();
+            using var plainNames = new TracingConfigurationScope().WithPlainOperationNames();
 
             using ActivityRecorder publishRecorder =
                 new(RabbitMQActivitySource.PublisherSourceName, "publish");
@@ -507,7 +469,7 @@ namespace Test.SequentialIntegration
              * await. That is the window the finally's cancellation guard covers; removing
              * it fails this test with an Error status on the span.
              */
-            using var plainNames = new PlainOperationNames();
+            using var plainNames = new TracingConfigurationScope().WithPlainOperationNames();
 
             using ActivityRecorder publishRecorder =
                 new(RabbitMQActivitySource.PublisherSourceName, "publish");
@@ -573,7 +535,7 @@ namespace Test.SequentialIntegration
              * span status=Unset with no exception event. A consumer failing on every
              * message traced as completely healthy.
              */
-            using var plainNames = new PlainOperationNames();
+            using var plainNames = new TracingConfigurationScope().WithPlainOperationNames();
 
             using ActivityRecorder deliverRecorder =
                 new(RabbitMQActivitySource.SubscriberSourceName, "deliver");
@@ -622,7 +584,7 @@ namespace Test.SequentialIntegration
              * AsyncEventingBasicConsumer's event wrapper swallows
              * OperationCanceledException, so it never propagates to the dispatcher.
              */
-            using var plainNames = new PlainOperationNames();
+            using var plainNames = new TracingConfigurationScope().WithPlainOperationNames();
 
             using ActivityRecorder deliverRecorder =
                 new(RabbitMQActivitySource.SubscriberSourceName, "deliver");
@@ -702,7 +664,7 @@ namespace Test.SequentialIntegration
              * The publisher source must have listeners for this to reproduce, which is
              * what the recorder here provides.
              */
-            using var plainNames = new PlainOperationNames();
+            using var plainNames = new TracingConfigurationScope().WithPlainOperationNames();
 
             using ActivityRecorder publishRecorder =
                 new(RabbitMQActivitySource.PublisherSourceName, "publish");
