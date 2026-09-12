@@ -116,24 +116,48 @@ namespace RabbitMQ.Client.ConsumerDispatching
          * The two racing threads are not the ones an earlier version of this comment named. All
          * four writes below are reached only from the serialized main loop - Channel's
          * HandleCommandAsync via session.CommandReceived, or an RPC continuation's
-         * HandleCommandAsync - so they are never concurrent with each other. What runs on an
-         * application thread is the Dispose() that completes the channel. Writer and completer
-         * being on different threads is what makes the window real.
+         * HandleCommandAsync - so they are never concurrent with each other. Note the token is not
+         * uniform across them: the two delivery/cancel sites get the main loop's token, while the
+         * two *OkAsync sites get an RPC continuation's linked token. Nor is the completer always an
+         * application thread. Dispose() runs on its caller's; AutorecoveringChannel disposes the
+         * replaced channel from the recovery task; and Channel.OnSessionShutdownAsync reaches
+         * TryComplete() on whichever thread drove the shutdown, which is the main loop when the
+         * broker or a heartbeat failure started it and the application thread when CloseAsync did
+         * (Connection.OnShutdownAsync has callers in both Connection.Receive.cs and
+         * Connection.CloseAsync). The window exists in the cases where writer and completer are
+         * different threads; it is not that one side is inherently the application's.
          *
          * So each site treats a completed channel the way it already treats a quiescing one: drop
-         * the work item. The delivery path additionally returns its pooled body, which nothing else
-         * will now do: Channel.HandleCommandAsync's finally calls cmd.ReturnBuffers(), but
-         * TakeoverBody() has already cleared cmd.Body, so that call is a no-op for the body.
+         * the work item. The delivery path additionally returns the dropped item's pooled body,
+         * because nothing else will: Channel.HandleCommandAsync's finally calls
+         * cmd.ReturnBuffers(), but TakeoverBody() has already cleared cmd.Body, so that call is a
+         * no-op for the body.
+         *
+         * READ THIS BEFORE TRUSTING THE CATCH CLAUSES BELOW. They cover the exceptional exits
+         * only, and those are the *rare* ones. The body is also dropped when the guard above is
+         * false and when the entry ThrowIfCancellationRequested throws, and neither of those is
+         * handled here. The guard case is not even a race: Channel.CloseAsync calls Quiesce()
+         * before transmitting channel.close, so every delivery arriving between that point and
+         * close-ok takes it. Measured by counting the four exits: 3000 messages per channel, no
+         * prefetch limit, a 5 ms consumer, six ordinary CloseAsync/DisposeAsync rounds - 4479
+         * delivered, 2971 dropped by the guard, and zero for the entry throw and for *both* catch
+         * clauses below. The split depends on how much of the backlog drains before the close, so
+         * treat the exact numbers as one configuration rather than a ratio; what did not vary
+         * across runs is that the guard fires in the hundreds per close and the catches fire not at
+         * all. Tracked separately rather than fixed here, so do not read these catches as making
+         * the delivery path's body accounting complete.
          *
          * A completed channel is also not the only way these writes can fail. Measured against
          * System.Threading.Channels on an unbounded channel: an already-cancelled token yields
          * TaskCanceledException, not ChannelClosedException, and when the channel is completed
          * *and* the token is cancelled, cancellation wins - so the ChannelClosedException handler
-         * does not run. That combination is the ordinary connection-teardown case rather than a
-         * corner, because the token reaching these methods is the main loop's, cancelled by
-         * MaybeTerminateMainloopAndStopHeartbeatTimers. The delivery path therefore also catches
-         * OperationCanceledException, to return the body before letting the cancellation continue
-         * to propagate as it did before. TryWrite, used by ShutdownConsumer below, does not throw
+         * does not run. That combination is a narrow corner rather than the ordinary teardown case:
+         * the entry ThrowIfCancellationRequested has already returned, so it needs the token to be
+         * cancelled inside the few await-free instructions before the write, and once
+         * _mainLoopCts is cancelled the receive loop stops dispatching frames at all. The delivery
+         * path catches OperationCanceledException anyway, as defence in depth, to return the body
+         * before letting the cancellation propagate as it did before. TryWrite, used by
+         * ShutdownConsumer below, does not throw
          * at all; it returns false.
          */
         public async ValueTask HandleBasicConsumeOkAsync(IAsyncBasicConsumer consumer, string consumerTag, CancellationToken cancellationToken)
@@ -413,6 +437,23 @@ namespace RabbitMQ.Client.ConsumerDispatching
                     exchange, routingKey, basicProperties, body, cancellationToken);
             }
 
+            /*
+             * NOT idempotent, and it cannot be made so without changing WorkStruct. This is a
+             * readonly struct and Body is a readonly field, while RentedMemory.Dispose() is not
+             * declared readonly and mutates (it clears RentedArray). C# therefore invokes it on a
+             * defensive copy. The array does reach ArrayPool<byte>.Shared.Return, but the guard
+             * write-back lands in that discarded copy, so a second Dispose() on the same value
+             * returns the same array again. Measured on a minimal struct of this exact shape: after
+             * the first Dispose the field still referenced the original array, and after a second
+             * Dispose two consecutive Rent calls handed out the same instance. A double return is
+             * worse than a leak, because the pool then gives one array to two owners.
+             *
+             * Every caller must therefore dispose a given work item exactly once. Today that holds:
+             * the reader loop disposes what it drains, and each drop site is reached by at most one
+             * of the mutually exclusive catch clauses. Anything that adds a second owner - a
+             * bounded channel, a retry around the write, a drain that runs alongside a drop path -
+             * has to re-establish it.
+             */
             public void Dispose()
             {
                 Body.Dispose();
