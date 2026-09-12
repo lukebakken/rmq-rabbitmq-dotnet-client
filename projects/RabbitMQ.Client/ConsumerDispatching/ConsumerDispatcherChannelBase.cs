@@ -111,13 +111,30 @@ namespace RabbitMQ.Client.ConsumerDispatching
          * delivery that unwinds through Channel.HandleCommandAsync, which has no catch, into the
          * connection's frame-receive loop - tearing down the whole connection rather than the one
          * channel, and abandoning the delivery's pooled body. That is the same failure the captured
-         * _shutdownToken above was introduced to remove, reached by a different route, and this one
-         * is reachable from an application thread rather than only from the serialized main loop.
+         * _shutdownToken above was introduced to remove, reached by a different route.
+         *
+         * The two racing threads are not the ones an earlier version of this comment named. All
+         * four writes below are reached only from the serialized main loop - Channel's
+         * HandleCommandAsync via session.CommandReceived, or an RPC continuation's
+         * HandleCommandAsync - so they are never concurrent with each other. What runs on an
+         * application thread is the Dispose() that completes the channel. Writer and completer
+         * being on different threads is what makes the window real.
          *
          * So each site treats a completed channel the way it already treats a quiescing one: drop
-         * the work item. A completed channel is the only reason TryWrite/WriteAsync can fail here,
-         * because the channel is unbounded. The delivery path additionally returns its pooled body,
-         * which nothing else will now do.
+         * the work item. The delivery path additionally returns its pooled body, which nothing else
+         * will now do: Channel.HandleCommandAsync's finally calls cmd.ReturnBuffers(), but
+         * TakeoverBody() has already cleared cmd.Body, so that call is a no-op for the body.
+         *
+         * A completed channel is also not the only way these writes can fail. Measured against
+         * System.Threading.Channels on an unbounded channel: an already-cancelled token yields
+         * TaskCanceledException, not ChannelClosedException, and when the channel is completed
+         * *and* the token is cancelled, cancellation wins - so the ChannelClosedException handler
+         * does not run. That combination is the ordinary connection-teardown case rather than a
+         * corner, because the token reaching these methods is the main loop's, cancelled by
+         * MaybeTerminateMainloopAndStopHeartbeatTimers. The delivery path therefore also catches
+         * OperationCanceledException, to return the body before letting the cancellation continue
+         * to propagate as it did before. TryWrite, used by ShutdownConsumer below, does not throw
+         * at all; it returns false.
          */
         public async ValueTask HandleBasicConsumeOkAsync(IAsyncBasicConsumer consumer, string consumerTag, CancellationToken cancellationToken)
         {
@@ -164,6 +181,19 @@ namespace RabbitMQ.Client.ConsumerDispatching
                 {
                     // Nothing will drain this item, so return its pooled body to the pool here.
                     work.Dispose();
+                }
+                catch (OperationCanceledException)
+                {
+                    /*
+                     * WriteAsync observes the token before the channel's completion, so a token
+                     * cancelled at the same moment the dispatcher is disposed lands here rather
+                     * than above - which is the ordinary teardown ordering, not a corner case.
+                     * The item still never reaches a consumer, so its pooled body still has to be
+                     * returned. Rethrow afterwards: cancellation propagated before this catch
+                     * existed and the method already throws on a token cancelled at entry.
+                     */
+                    work.Dispose();
+                    throw;
                 }
             }
         }
