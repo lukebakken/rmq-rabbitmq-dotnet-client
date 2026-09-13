@@ -144,8 +144,8 @@ namespace RabbitMQ.Client.ConsumerDispatching
          * clauses below. The split depends on how much of the backlog drains before the close, so
          * treat the exact numbers as one configuration rather than a ratio; what did not vary
          * across runs is that the guard fires in the hundreds per close and the catches fire not at
-         * all. Tracked separately rather than fixed here, so do not read these catches as making
-         * the delivery path's body accounting complete.
+         * all. Tracked as issue #2039 rather than fixed here, so do not read these catches as
+         * making the delivery path's body accounting complete.
          *
          * A completed channel is also not the only way these writes can fail. Measured against
          * System.Threading.Channels on an unbounded channel: an already-cancelled token yields
